@@ -27,56 +27,52 @@ import android.bluetooth.BluetoothGatt;
 import android.bluetooth.BluetoothGattCharacteristic;
 import android.bluetooth.BluetoothGattService;
 import android.content.Context;
-import android.util.Log;
 
+import androidx.annotation.IntRange;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.lifecycle.LiveData;
 import androidx.lifecycle.MutableLiveData;
 
+import java.util.List;
 import java.util.UUID;
 
+import no.nordicsemi.android.ble.callback.DataReceivedCallback;
+import no.nordicsemi.android.ble.common.callback.battery.BatteryLevelDataCallback;
 import no.nordicsemi.android.ble.data.Data;
 import no.nordicsemi.android.ble.livedata.ObservableBleManager;
-import no.nordicsemi.android.blinky.profile.callback.BlinkyButtonDataCallback;
-import no.nordicsemi.android.blinky.profile.callback.BlinkyLedDataCallback;
-import no.nordicsemi.android.blinky.profile.data.BlinkyLED;
 import no.nordicsemi.android.log.LogContract;
 import no.nordicsemi.android.log.LogSession;
 import no.nordicsemi.android.log.Logger;
+import no.nordicsemi.android.ble.common.callback.hr.HeartRateMeasurementDataCallback;
+
 
 public class BlinkyManager extends ObservableBleManager {
-	/** Nordic Blinky Service UUID. */
-	public final static UUID LBS_UUID_SERVICE = UUID.fromString("00001523-1212-efde-1523-785feabcd123");
-	/** BUTTON characteristic UUID. */
-	private final static UUID LBS_UUID_BUTTON_CHAR = UUID.fromString("00001524-1212-efde-1523-785feabcd123");
-	/** LED characteristic UUID. */
-	private final static UUID LBS_UUID_LED_CHAR = UUID.fromString("00001525-1212-efde-1523-785feabcd123");
 
-	private final MutableLiveData<Boolean> ledState = new MutableLiveData<>();
-	private final MutableLiveData<Boolean> buttonState = new MutableLiveData<>();
+	public static final UUID HEART_RATE_UUID_SERVICE = UUID.fromString("0000180D-0000-1000-8000-00805f9b34fb");
+	private static final UUID HEART_RATE_MEASUREMENT_UUID_CHAR = UUID.fromString("00002A37-0000-1000-8000-00805f9b34fb");
+	private final static UUID BATTERY_UUID_SERVICE = UUID.fromString("0000180F-0000-1000-8000-00805f9b34fb"); // battery
+	private final static UUID BATTERY_LEVEL_UUID_CHAR = UUID.fromString("00002A19-0000-1000-8000-00805f9b34fb"); // battery
 
-	private BluetoothGattCharacteristic buttonCharacteristic, ledCharacteristic;
+	private final MutableLiveData<Integer> heartRateState = new MutableLiveData<>();
+	private final MutableLiveData<Integer> batteryState = new MutableLiveData<>();
+	private BluetoothGattCharacteristic heartRateCharacteristic, batteryLevelCharacteristic;
 	private LogSession logSession;
-	private boolean supported;
-	private boolean ledOn;
 
 	public BlinkyManager(@NonNull final Context context) {
 		super(context);
 	}
 
-	public final LiveData<Boolean> getLedState() {
-		return ledState;
+	public final LiveData<Integer> getHeartRate() {
+		return heartRateState;
 	}
 
-	public final LiveData<Boolean> getButtonState() {
-		return buttonState;
-	}
+	public final LiveData<Integer> getBatteryLevel() { return batteryState; }
 
 	@NonNull
 	@Override
 	protected BleManagerGattCallback getGattCallback() {
-		return new BlinkyBleManagerGattCallback();
+		return new HeartRateManagerGattCallback();
 	}
 
 	/**
@@ -94,116 +90,81 @@ public class BlinkyManager extends ObservableBleManager {
 	}
 
 	@Override
-	protected boolean shouldClearCacheWhenDisconnected() {
-		return !supported;
-	}
+	protected boolean shouldClearCacheWhenDisconnected() { return heartRateCharacteristic == null; }
 
-	/**
-	 * The Button callback will be notified when a notification from Button characteristic
-	 * has been received, or its data was read.
-	 * <p>
-	 * If the data received are valid (single byte equal to 0x00 or 0x01), the
-	 * {@link BlinkyButtonDataCallback#onButtonStateChanged} will be called.
-	 * Otherwise, the {@link BlinkyButtonDataCallback#onInvalidDataReceived(BluetoothDevice, Data)}
-	 * will be called with the data received.
-	 */
-	private	final BlinkyButtonDataCallback buttonCallback = new BlinkyButtonDataCallback() {
+	// in no.nordicsemi.android.ble.common.callback.hr
+	private final HeartRateMeasurementDataCallback HeartRateCallback = new HeartRateMeasurementDataCallback() {
 		@Override
-		public void onButtonStateChanged(@NonNull final BluetoothDevice device,
-										 final boolean pressed) {
-			log(LogContract.Log.Level.APPLICATION, "Button " + (pressed ? "pressed" : "released"));
-			buttonState.setValue(pressed);
+		public void onDataReceived(@NonNull final BluetoothDevice device, @NonNull final Data data) {
+			super.onDataReceived(device, data);
 		}
 
 		@Override
-		public void onInvalidDataReceived(@NonNull final BluetoothDevice device,
-										  @NonNull final Data data) {
-			log(Log.WARN, "Invalid data received: " + data);
+		public void onHeartRateMeasurementReceived(@NonNull final BluetoothDevice device,
+												   @IntRange(from = 0) final int heartRate,
+												   @Nullable final Boolean contactDetected,
+												   @Nullable @IntRange(from = 0) final Integer energyExpanded,
+												   @Nullable final List<Integer> rrIntervals) {
+			heartRateState.setValue(heartRate);
 		}
 	};
 
-	/**
-	 * The LED callback will be notified when the LED state was read or sent to the target device.
-	 * <p>
-	 * This callback implements both {@link no.nordicsemi.android.ble.callback.DataReceivedCallback}
-	 * and {@link no.nordicsemi.android.ble.callback.DataSentCallback} and calls the same
-	 * method on success.
-	 * <p>
-	 * If the data received were invalid, the
-	 * {@link BlinkyLedDataCallback#onInvalidDataReceived(BluetoothDevice, Data)} will be
-	 * called.
-	 */
-	private final BlinkyLedDataCallback ledCallback = new BlinkyLedDataCallback() {
+	// no.nordicsemi.android.ble.common.callback.battery
+	private final DataReceivedCallback batteryLevelCallback = new BatteryLevelDataCallback() {
 		@Override
-		public void onLedStateChanged(@NonNull final BluetoothDevice device,
-									  final boolean on) {
-			ledOn = on;
-			log(LogContract.Log.Level.APPLICATION, "LED " + (on ? "ON" : "OFF"));
-			ledState.setValue(on);
+		public void onBatteryLevelChanged(@NonNull final BluetoothDevice device,
+										  @IntRange(from = 0, to = 100) final int batteryLevel) {
+			batteryState.setValue(batteryLevel);
 		}
 
 		@Override
-		public void onInvalidDataReceived(@NonNull final BluetoothDevice device,
-										  @NonNull final Data data) {
-			// Data can only invalid if we read them. We assume the app always sends correct data.
-			log(Log.WARN, "Invalid data received: " + data);
+		public void onInvalidDataReceived(@NonNull final BluetoothDevice device, final @NonNull Data data) {
+			super.onInvalidDataReceived(device, data);
 		}
 	};
 
 	/**
 	 * BluetoothGatt callbacks object.
 	 */
-	private class BlinkyBleManagerGattCallback extends BleManagerGattCallback {
+	//TODO - having battery and heart rate in this class does not seem like best practice.
+	// what is the correct implimentation? Not sure how to split in two classes in gattCallback()
+	// only called once and expects one obj returned
+	private class HeartRateManagerGattCallback extends BleManagerGattCallback {
 		@Override
 		protected void initialize() {
-			setNotificationCallback(buttonCharacteristic).with(buttonCallback);
-			readCharacteristic(ledCharacteristic).with(ledCallback).enqueue();
-			readCharacteristic(buttonCharacteristic).with(buttonCallback).enqueue();
-			enableNotifications(buttonCharacteristic).enqueue();
+			// Heart rate
+			setNotificationCallback(heartRateCharacteristic).with(HeartRateCallback);
+			enableNotifications(heartRateCharacteristic).enqueue();
+
+			// Battery
+			readCharacteristic(batteryLevelCharacteristic).with(batteryLevelCallback).enqueue();
+			setNotificationCallback(batteryLevelCharacteristic).with(batteryLevelCallback);
+			enableNotifications(batteryLevelCharacteristic).enqueue();
+
 		}
 
 		@Override
-		public boolean isRequiredServiceSupported(@NonNull final BluetoothGatt gatt) {
-			final BluetoothGattService service = gatt.getService(LBS_UUID_SERVICE);
+		protected boolean isRequiredServiceSupported(@NonNull final BluetoothGatt gatt) {
+			final BluetoothGattService service = gatt.getService(HEART_RATE_UUID_SERVICE);
 			if (service != null) {
-				buttonCharacteristic = service.getCharacteristic(LBS_UUID_BUTTON_CHAR);
-				ledCharacteristic = service.getCharacteristic(LBS_UUID_LED_CHAR);
+				heartRateCharacteristic = service.getCharacteristic(HEART_RATE_MEASUREMENT_UUID_CHAR);
 			}
+			return heartRateCharacteristic != null;
+		}
 
-			boolean writeRequest = false;
-			if (ledCharacteristic != null) {
-				final int rxProperties = ledCharacteristic.getProperties();
-				writeRequest = (rxProperties & BluetoothGattCharacteristic.PROPERTY_WRITE) > 0;
+		@Override
+		protected boolean isOptionalServiceSupported(@NonNull final BluetoothGatt gatt) {
+			final BluetoothGattService service = gatt.getService(BATTERY_UUID_SERVICE);
+			if (service != null) {
+				batteryLevelCharacteristic = service.getCharacteristic(BATTERY_LEVEL_UUID_CHAR);
 			}
-
-			supported = buttonCharacteristic != null && ledCharacteristic != null && writeRequest;
-			return supported;
+			return batteryLevelCharacteristic != null;
 		}
 
 		@Override
 		protected void onDeviceDisconnected() {
-			buttonCharacteristic = null;
-			ledCharacteristic = null;
+			heartRateCharacteristic = null;
+			batteryLevelCharacteristic = null;
 		}
-	}
-
-	/**
-	 * Sends a request to the device to turn the LED on or off.
-	 *
-	 * @param on true to turn the LED on, false to turn it off.
-	 */
-	public void turnLed(final boolean on) {
-		// Are we connected?
-		if (ledCharacteristic == null)
-			return;
-
-		// No need to change?
-		if (ledOn == on)
-			return;
-
-		log(Log.VERBOSE, "Turning LED " + (on ? "ON" : "OFF") + "...");
-		writeCharacteristic(ledCharacteristic,
-				on ? BlinkyLED.turnOn() : BlinkyLED.turnOff())
-				.with(ledCallback).enqueue();
 	}
 }
